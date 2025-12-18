@@ -1,195 +1,122 @@
+import streamlit as st
 import cv2
-import time
-import pandas as pd
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
-from datetime import datetime
 from ultralytics import YOLO
-from sentence_transformers import SentenceTransformer
-from sklearn.cluster import KMeans
-import os
+from datetime import datetime
+import time
 
-# ============================================
-# 1. CONFIGURACIÓN INICIAL
-# ============================================
+st.set_page_config(page_title="Contador Personas Carnaval Nariño", layout="wide")
+st.title("🎭 Contador de Personas con Densidad en Tiempo Real")
+st.markdown("Apunta la cámara a la multitud y obtén densidad en personas/m²")
 
-print("Cargando modelo YOLOv8 para detección de personas...")
-model = YOLO("yolov8s.pt")  # Descarga automática la primera vez. Usa yolov8m.pt para más precisión
-PERSON_CLASS_ID = 0
+with st.sidebar:
+    st.header("Configuración")
+    area_visible = st.number_input("Área visible de la cámara (m²)", min_value=1.0, value=30.0, step=5.0)
+    conf_threshold = st.slider("Umbral de confianza YOLO", 0.1, 1.0, 0.4, 0.05)
+    st.markdown("---")
+    st.caption("Modelo: YOLOv8s (preentrenado en personas)")
 
-print("Cargando modelo de texto para clustering...")
-text_model = SentenceTransformer("all-MiniLM-L6-v2")
+@st.cache_resource
+def load_model():
+    return YOLO("yolov8s.pt")
 
-# Preguntar área visible
-try:
-    area_visible = float(input("\n¿Cuántos metros cuadrados cubre aproximadamente el área visible de la cámara? "
-                                "\n(Ej: si está a 4-5m de altura → ingresa 30): "))
-    if area_visible <= 0:
-        raise ValueError
-except:
-    print("Valor inválido. Usando 30 m² por defecto.")
-    area_visible = 30.0
+model = load_model()
 
-print(f"\nÁrea visible configurada: {area_visible} m²")
-print("→ Se calculará densidad real en personas/m²\n")
+if "running" not in st.session_state:
+    st.session_state.running = False
+if "data" not in st.session_state:
+    st.session_state.data = []
 
-# Opcional: área total para extrapolación
-try:
-    area_total = float(input("¿Área total de la zona que quieres estimar (m²)? (Ej: plaza completa 1000). "
-                             "Presiona Enter para omitir: ") or "0")
-except:
-    area_total = 0
+col1, col2 = st.columns(2)
+with col1:
+    if st.button("Iniciar Cámara", type="primary"):
+        st.session_state.running = True
+        st.session_state.data = []
+        st.rerun()
+with col2:
+    if st.button("Detener y Generar Reporte"):
+        st.session_state.running = False
+        st.rerun()
 
-# ============================================
-# 2. FUNCIÓN DE CLASIFICACIÓN DE DENSIDAD
-# ============================================
+frame_placeholder = st.empty()
+info_placeholder = st.empty()
+chart_placeholder = st.empty()
 
-def clasificar_densidad(densidad):
-    if densidad < 1.0:
-        return "baja densidad"
-    elif densidad < 2.0:
-        return "densidad media"
-    elif densidad < 3.0:
-        return "alta densidad"
-    else:
-        return "muy alta densidad (¡atención!)"
-
-# ============================================
-# 3. CÁMARA Y CSV
-# ============================================
-
+# Intentar acceder a la cámara
 cap = cv2.VideoCapture(0)
-if not cap.isOpened():
-    print("Error: No se pudo abrir la cámara")
-    exit()
 
-# Ruta CSV en Escritorio
-desktop = os.path.join(os.path.expanduser("~"), "Desktop")
-csv_path = os.path.join(desktop, f"conteo_personas_densidad_{datetime.now().strftime('%Y%m%d_%H%M')}.csv")
-
-data = []
-densidades = []
-inicio = time.time()
-PROMEDIO_CADA = 10
-
-print("▶ INICIADO - Apunta la cámara y presiona 'q' para detener\n")
-
-# ============================================
-# 4. LOOP PRINCIPAL
-# ============================================
-
-try:
-    while True:
+if st.session_state.running:
+    while st.session_state.running:
         ret, frame = cap.read()
         if not ret:
+            st.error("No se pudo acceder a la cámara. Prueba en modo local o permite acceso.")
             break
 
-        results = model(frame, conf=0.4, classes=[PERSON_CLASS_ID])[0]
+        results = model(frame, conf=conf_threshold, classes=[0])[0]
         personas = len(results.boxes) if results.boxes is not None else 0
-
-        # Calcular densidad
         densidad = personas / area_visible if area_visible > 0 else 0
-        clasificacion = clasificar_densidad(densidad)
 
-        # Dibujar cajas
-        if results.boxes is not None:
-            for box in results.boxes:
-                x1, y1, x2, y2 = map(int, box.xyxy[0])
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 3)
+        annotated_frame = results.plot()
+
+        cv2.putText(annotated_frame, f"Personas: {personas}", (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 4)
+        cv2.putText(annotated_frame, f"Densidad: {densidad:.2f} pers/m²", (20, 120), cv2.FONT_HERSHEY_SIMPLEX, 1.3, (255, 255, 0), 3)
 
         ts = datetime.now().strftime("%H:%M:%S")
-
-        # Mostrar en pantalla
-        cv2.putText(frame, f"Personas: {personas}", (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 4)
-        cv2.putText(frame, f"Densidad: {densidad:.2f} pers/m²", (20, 120), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 0), 3)
-        cv2.putText(frame, clasificacion.upper(), (20, 180), cv2.FONT_HERSHEY_SIMPLEX, 1.1, (0, 255, 255), 3)
-        cv2.putText(frame, f"Hora: {ts}", (20, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-
-        cv2.imshow("Contador con Densidad - Carnaval Nariño", frame)
-
-        # Guardar datos
-        data.append({
+        st.session_state.data.append({
             "timestamp": ts,
             "personas": personas,
-            "densidad_pers_m2": round(densidad, 3),
-            "clasificacion": clasificacion
+            "densidad_pers_m2": round(densidad, 3)
         })
-        densidades.append(densidad)
 
-        # Promedio cada 10 segundos
-        if time.time() - inicio >= PROMEDIO_CADA:
-            prom_densidad = np.mean(densidades)
-            prom_personas = np.mean([d["personas"] for d in data[-300:]])  # aprox últimos 10s
-            print(f"Promedio últimos {PROMEDIO_CADA}s: {prom_personas:.1f} personas → "
-                  f"{prom_densidad:.2f} pers/m² ({clasificar_densidad(prom_densidad)})")
-            densidades = []
-            inicio = time.time()
+        frame_placeholder.image(annotated_frame, channels="BGR", use_column_width=True)
 
-        if cv2.waitKey(1) == ord('q'):
-            break
+        clasificacion = "BAJA" if densidad < 1 else "MEDIA" if densidad < 2 else "ALTA" if densidad < 3 else "¡MUY ALTA!"
+        info_placeholder.markdown(f"""
+        **Estado actual**  
+        Personas detectadas: **{personas}**  
+        Densidad: **{densidad:.2f} personas/m²** → **{clasificacion}**  
+        Registros: {len(st.session_state.data)}
+        """)
 
-except Exception as e:
-    print(f"Error: {e}")
+        if len(st.session_state.data) > 10:
+            df_live = pd.DataFrame(st.session_state.data)
+            fig, ax = plt.subplots(figsize=(10, 4))
+            ax.plot(df_live["densidad_pers_m2"], color="red", linewidth=2)
+            ax.set_title("Densidad en tiempo real")
+            ax.grid(True, alpha=0.3)
+            chart_placeholder.pyplot(fig)
+            plt.close(fig)
 
-finally:
-    if cap.isOpened():
-        cap.release()
-    cv2.destroyAllWindows()
-    cv2.waitKey(1)
+        time.sleep(0.03)
+        st.rerun()
 
-# ============================================
-# 5. GUARDAR CSV Y RESUMEN
-# ============================================
+cap.release()
 
-if len(data) > 0:
-    df = pd.DataFrame(data)
+if len(st.session_state.data) > 0 and not st.session_state.running:
+    df = pd.DataFrame(st.session_state.data)
+    st.success(f"¡Captura finalizada! {len(df)} registros")
 
-    # Clustering de clasificaciones
-    embeddings = text_model.encode(df["clasificacion"].tolist())
-    n_clusters = min(4, max(1, len(set(df["clasificacion"]))))
-    kmeans = KMeans(n_clusters=n_clusters, random_state=42)
-    df["cluster"] = kmeans.fit_predict(embeddings)
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Densidad promedio", f"{df['densidad_pers_m2'].mean():.2f} pers/m²")
+    col2.metric("Densidad máxima", f"{df['densidad_pers_m2'].max():.2f} pers/m²")
+    col3.metric("Personas promedio", f"{df['personas'].mean():.1f}")
 
-    # Guardar CSV
-    df.to_csv(csv_path, index=False)
+    fig, ax = plt.subplots(figsize=(12, 6))
+    ax.plot(df["personas"], label="Personas", color="blue")
+    ax.plot(df["densidad_pers_m2"] * 20, label="Densidad x20", color="red")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    st.pyplot(fig)
 
-    # Estadísticas
-    densidad_promedio = df["densidad_pers_m2"].mean()
-    densidad_max = df["densidad_pers_m2"].max()
-    personas_promedio = df["personas"].mean()
-
-    print(f"\n¡Captura finalizada!")
-    print(f"CSV guardado en tu Escritorio:")
-    print(f"   {csv_path}")
-    print(f"   {len(df)} registros capturados")
-
-    print(f"\nRESUMEN DE DENSIDAD:")
-    print(f"• Densidad promedio: {densidad_promedio:.2f} personas/m²")
-    print(f"• Densidad máxima: {densidad_max:.2f} personas/m²")
-    print(f"• Personas promedio visibles: {personas_promedio:.1f}")
-
-    if area_total > 0:
-        estimado_total = densidad_promedio * area_total
-        print(f"\nESTIMACIÓN EXTRAPOLADA (para {area_total} m²):")
-        print(f"→ Aproximadamente {estimado_total:.0f} personas en toda la zona")
-
-    # Gráficos
-    plt.figure(figsize=(12,8))
-    plt.subplot(2,1,1)
-    plt.plot(df["personas"], color="blue", linewidth=2)
-    plt.title("Conteo de personas por frame")
-    plt.ylabel("Personas")
-    plt.grid(True, alpha=0.3)
-
-    plt.subplot(2,1,2)
-    plt.plot(df["densidad_pers_m2"], color="red", linewidth=2)
-    plt.title("Densidad real (personas/m²)")
-    plt.xlabel("Tiempo (frames)")
-    plt.ylabel("Densidad (pers/m²)")
-    plt.grid(True, alpha=0.3)
-
-    plt.tight_layout()
-    plt.show()
+    csv = df.to_csv(index=False).encode()
+    st.download_button(
+        label="📥 Descargar CSV completo",
+        data=csv,
+        file_name=f"conteo_carnaval_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+        mime="text/csv"
+    )
 
 else:
-    print("No se capturaron datos.")
+    st.info("Presiona 'Iniciar Cámara' para comenzar el conteo en vivo.")
